@@ -121,6 +121,11 @@ namespace System
 		private static bool TryGetNameFromPath (string path, out string name)
 		{
 			name = null;
+#if UNITY
+			//Avoids calling readlink on webgl, which causes abort due to dlopen
+			if(!File.Exists(path))
+				return false;
+#endif
 			var linkPath = readlink (path);
 			if (linkPath != null) {
 				if (Path.IsPathRooted(linkPath))
