@@ -24,9 +24,6 @@
 #include "interp-internals.h"
 #include "interp.h"
 
-// TODO: export from marshal.c
-MonoDelegate* mono_ftnptr_to_delegate (MonoClass *klass, gpointer ftn);
-
 #define DEBUG 0
 
 typedef struct
@@ -1062,7 +1059,9 @@ no_intrinsic:
 		(target_method->flags & METHOD_ATTRIBUTE_PINVOKE_IMPL) == 0 && 
 		(target_method->iflags & METHOD_IMPL_ATTRIBUTE_INTERNAL_CALL) == 0 &&
 		!(target_method->iflags & METHOD_IMPL_ATTRIBUTE_NOINLINING)) {
-		int called_inited = mono_class_vtable (domain, target_method->klass)->initialized;
+		MonoVTable *vt = mono_class_vtable_checked (domain, target_method->klass, error);
+		return_if_nok (error);
+		int called_inited = vt->initialized;
 
 		if (/*mono_metadata_signature_equal (method->signature, target_method->signature) */ method == target_method && *(td->ip + 5) == CEE_RET) {
 			int offset;
@@ -1818,6 +1817,16 @@ generate (MonoMethod *method, MonoMethodHeader *header, InterpMethod *rtm, unsig
 		if (sym_seq_points)
 			bb_exit = td->offset_to_bb [td->ip - header->code];
 
+		if (is_bb_start [in_offset]) {
+			int index = td->clause_indexes [in_offset];
+			if (index != -1) {
+				MonoExceptionClause *clause = &header->clauses [index];
+				if (clause->flags == MONO_EXCEPTION_CLAUSE_FINALLY &&
+						in_offset == clause->handler_offset)
+					ADD_CODE (td, MINT_START_ABORT_PROT);
+			}
+		}
+
 		switch (*td->ip) {
 		case CEE_NOP: 
 			/* lose it */
@@ -2019,18 +2028,19 @@ generate (MonoMethod *method, MonoMethodHeader *header, InterpMethod *rtm, unsig
 		}
 		case CEE_RET: {
 			int vt_size = 0;
-			if (signature->ret->type != MONO_TYPE_VOID) {
+			MonoType *ult = mini_type_get_underlying_type (signature->ret);
+			if (ult->type != MONO_TYPE_VOID) {
 				--td->sp;
-				MonoClass *klass = mono_class_from_mono_type (signature->ret);
-				if (mint_type (&klass->byval_arg) == MINT_TYPE_VT) {
+				if (mint_type (ult) == MINT_TYPE_VT) {
+					MonoClass *klass = mono_class_from_mono_type (ult);
 					vt_size = mono_class_value_size (klass, NULL);
 					vt_size = (vt_size + 7) & ~7;
 				}
 			}
 			if (td->sp > td->stack)
-				g_warning ("%s.%s: CEE_RET: more values on stack: %d", td->method->klass->name, td->method->name, td->sp - td->stack);
+				g_warning ("%s: CEE_RET: more values on stack: %d", mono_method_full_name (td->method, TRUE), td->sp - td->stack);
 			if (td->vt_sp != vt_size)
-				g_error ("%s.%s: CEE_RET: value type stack: %d vs. %d", td->method->klass->name, td->method->name, td->vt_sp, vt_size);
+				g_error ("%s: CEE_RET: value type stack: %d vs. %d", mono_method_full_name (td->method, TRUE), td->vt_sp, vt_size);
 
 			if (sym_seq_points) {
 				InterpBasicBlock *cbb = td->offset_to_bb [td->ip - header->code];
@@ -2039,7 +2049,7 @@ generate (MonoMethod *method, MonoMethodHeader *header, InterpMethod *rtm, unsig
 			}
 
 			if (vt_size == 0)
-				SIMPLE_OP(td, signature->ret->type == MONO_TYPE_VOID ? MINT_RET_VOID : MINT_RET);
+				SIMPLE_OP(td, ult->type == MONO_TYPE_VOID ? MINT_RET_VOID : MINT_RET);
 			else {
 				ADD_CODE(td, MINT_RET_VT);
 				WRITE32(td, &vt_size);
@@ -2700,6 +2710,11 @@ generate (MonoMethod *method, MonoMethodHeader *header, InterpMethod *rtm, unsig
 
 			csignature = mono_method_signature (m);
 			klass = m->klass;
+
+			if (!mono_class_init (klass)) {
+				mono_error_set_for_class_failure (error, klass);
+				return_if_nok (error);
+			}
 
 			td->sp -= csignature->param_count;
 			if (mono_class_is_magic_int (klass) || mono_class_is_magic_float (klass)) {
@@ -3671,36 +3686,42 @@ generate (MonoMethod *method, MonoMethodHeader *header, InterpMethod *rtm, unsig
 			binary_arith_op(td, MINT_SUB_OVF_UN_I4);
 			++td->ip;
 			break;
-		case CEE_ENDFINALLY:
+		case CEE_ENDFINALLY: {
 			g_assert (td->clause_indexes [in_offset] != -1);
+			MonoExceptionClause *clause = &header->clauses [td->clause_indexes [in_offset]];
+			if (clause->flags == MONO_EXCEPTION_CLAUSE_FINALLY)
+				ADD_CODE (td, MINT_END_ABORT_PROT);
 			td->sp = td->stack;
 			SIMPLE_OP (td, MINT_ENDFINALLY);
 			ADD_CODE (td, td->clause_indexes [in_offset]);
 			generating_code = 0;
 			break;
+		}
 		case CEE_LEAVE:
+		case CEE_LEAVE_S: {
+			int offset;
+
+			if (*td->ip == CEE_LEAVE)
+				offset = 5 + read32 (td->ip + 1);
+			else
+				offset = 2 + (gint8)td->ip [1];
+
 			td->sp = td->stack;
 			if (td->clause_indexes [in_offset] != -1) {
 				/* LEAVE instructions in catch clauses need to check for abort exceptions */
-				handle_branch (td, MINT_LEAVE_S_CHECK, MINT_LEAVE_CHECK, 5 + read32 (td->ip + 1));
+				handle_branch (td, MINT_LEAVE_S_CHECK, MINT_LEAVE_CHECK, offset);
 			} else {
-				handle_branch (td, MINT_LEAVE_S, MINT_LEAVE, 5 + read32 (td->ip + 1));
+				handle_branch (td, MINT_LEAVE_S, MINT_LEAVE, offset);
 			}
-			td->ip += 5;
+
+			if (*td->ip == CEE_LEAVE)
+				td->ip += 5;
+			else
+				td->ip += 2;
 			generating_code = 0;
 			break;
-		case CEE_LEAVE_S:
-			td->sp = td->stack;
-			if (td->clause_indexes [in_offset] != -1) {
-				/* LEAVE instructions in catch clauses need to check for abort exceptions */
-				handle_branch (td, MINT_LEAVE_S_CHECK, MINT_LEAVE_CHECK, 2 + (gint8)td->ip [1]);
-			} else {
-				handle_branch (td, MINT_LEAVE_S, MINT_LEAVE, 2 + (gint8)td->ip [1]);
-			}
-			td->ip += 2;
-			generating_code = 0;
-			break;
-		case CEE_UNUSED41:
+		}
+		case MONO_CUSTOM_PREFIX:
 			++td->ip;
 		        switch (*td->ip) {
 				case CEE_MONO_CALLI_EXTRA_ARG:
@@ -3765,19 +3786,25 @@ generate (MonoMethod *method, MonoMethodHeader *header, InterpMethod *rtm, unsig
 						}
 						break;
 					case 3:
+						if (MONO_TYPE_IS_VOID (info->sig->ret)) {
+							if (info->sig->params [2]->type == MONO_TYPE_I4)
+								ADD_CODE (td,MINT_ICALL_PPI_V);
+							else
+								ADD_CODE (td,MINT_ICALL_PPP_V);
+						} else {
+							g_assert (info->sig->params [1]->type == MONO_TYPE_I4 && info->sig->params [2]->type == MONO_TYPE_I4);
+							ADD_CODE (td, MINT_ICALL_PII_P);
+						}
+						break;
+					case 4:
 						g_assert (MONO_TYPE_IS_VOID (info->sig->ret));
-						if (info->sig->params [2]->type == MONO_TYPE_I4)
-							ADD_CODE (td,MINT_ICALL_PPI_V);
-						else
-							ADD_CODE (td,MINT_ICALL_PPP_V);
+						g_assert (info->sig->params [2]->type == MONO_TYPE_I4 && info->sig->params [3]->type == MONO_TYPE_I4);
+						ADD_CODE (td, MINT_ICALL_PPII_V);
 						break;
 					default:
 						g_assert_not_reached ();
 					}
 
-					if (func == mono_ftnptr_to_delegate) {
-						g_error ("TODO: CEE_MONO_ICALL mono_ftnptr_to_delegate?");
-					}
 					ADD_CODE(td, get_data_item_index (td, func));
 					td->sp -= info->sig->param_count;
 
@@ -4305,7 +4332,7 @@ mono_interp_transform_method (InterpMethod *imethod, ThreadContext *context, Int
 	}
 
 	// g_printerr ("TRANSFORM(0x%016lx): begin %s::%s\n", mono_thread_current (), method->klass->name, method->name);
-	method_class_vt = mono_class_vtable_full (domain, imethod->method->klass, &error);
+	method_class_vt = mono_class_vtable_checked (domain, imethod->method->klass, &error);
 	if (!is_ok (&error))
 		return mono_error_convert_to_exception (&error);
 
@@ -4443,11 +4470,18 @@ mono_interp_transform_method (InterpMethod *imethod, ThreadContext *context, Int
 				m = mono_get_method_checked (image, read32 (ip + 1), NULL, generic_context, &error);
 				if (!is_ok (&error)) {
 					g_free (is_bb_start);
+					mono_metadata_free_mh (header);
 					return mono_error_convert_to_exception (&error);
 				}
 				mono_class_init (m->klass);
-				if (!mono_class_is_interface (m->klass))
-					mono_class_vtable (domain, m->klass);
+				if (!mono_class_is_interface (m->klass)) {
+					mono_class_vtable_checked (domain, m->klass, &error);
+					if (!is_ok (&error)) {
+						g_free (is_bb_start);
+						mono_metadata_free_mh (header);
+						return mono_error_convert_to_exception (&error);
+					}
+				}
 			}
 			ip += 5;
 			break;

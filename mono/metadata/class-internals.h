@@ -924,7 +924,7 @@ void
 mono_classes_cleanup (void);
 
 void
-mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_size, gboolean sre);
+mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_size, int real_size, gboolean sre);
 
 void
 mono_class_setup_interface_offsets (MonoClass *klass);
@@ -1123,6 +1123,7 @@ typedef struct {
 	MonoClass *generic_ireadonlylist_class;
 	MonoClass *threadpool_wait_callback_class;
 	MonoMethod *threadpool_perform_wait_callback_method;
+	MonoClass *console_class;
 } MonoDefaults;
 
 #ifdef DISABLE_REMOTING
@@ -1366,7 +1367,7 @@ MonoClassField*
 mono_class_get_field_from_name_full (MonoClass *klass, const char *name, MonoType *type);
 
 MonoVTable*
-mono_class_vtable_full (MonoDomain *domain, MonoClass *klass, MonoError *error);
+mono_class_vtable_checked (MonoDomain *domain, MonoClass *klass, MonoError *error);
 
 gboolean
 mono_class_is_assignable_from_slow (MonoClass *target, MonoClass *candidate);
@@ -1541,6 +1542,9 @@ mono_class_set_weak_bitmap (MonoClass *klass, int nbits, gsize *bits);
 
 gsize*
 mono_class_get_weak_bitmap (MonoClass *klass, int *nbits);
+
+MonoMethod *
+mono_class_get_method_from_name_checked (MonoClass *klass, const char *name, int param_count, int flags, MonoError *error);
 
 /*Now that everything has been defined, let's include the inline functions */
 #include <mono/metadata/class-inlines.h>

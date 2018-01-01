@@ -5,6 +5,7 @@
 #ifndef __MONO_OBJECT_INTERNALS_H__
 #define __MONO_OBJECT_INTERNALS_H__
 
+#include <mono/metadata/object-forward.h>
 #include <mono/metadata/object.h>
 #include <mono/metadata/threads.h>
 #include <mono/metadata/reflection.h>
@@ -84,15 +85,17 @@
 			tmp_klass; })
 /* eclass should be a run-time constant */
 #define mono_array_new_cached(domain, eclass, size, error) ({	\
-			MonoVTable *__vtable = mono_class_vtable ((domain), mono_array_class_get_cached ((eclass), 1));	\
-			MonoArray *__arr = mono_array_new_specific_checked (__vtable, (size), (error)); \
-			__arr; })
+	MonoVTable *__vtable = mono_class_vtable_checked ((domain), mono_array_class_get_cached ((eclass), 1), (error)); \
+	MonoArray *__arr = NULL;					\
+	if (is_ok ((error)))						\
+		__arr = mono_array_new_specific_checked (__vtable, (size), (error)); \
+	__arr; })
 
 #else
 
 #define mono_class_get_field_from_name_cached(klass,name) mono_class_get_field_from_name ((klass), (name))
 #define mono_array_class_get_cached(eclass,rank) mono_array_class_get ((eclass), (rank))
-#define mono_array_new_cached(domain, eclass, size, error) mono_array_new_specific_checked (mono_class_vtable ((domain), mono_array_class_get_cached ((eclass), 1)), (size), (error))
+#define mono_array_new_cached(domain, eclass, size, error) mono_array_new_checked ((domain), (eclass), (size), (error))
 
 #endif
 
@@ -1234,7 +1237,7 @@ typedef enum {
 	MonoTypeBuilderFinished = 2
 } MonoTypeBuilderState;
 
-typedef struct {
+struct _MonoReflectionTypeBuilder {
 	MonoReflectionType type;
 	MonoString *name;
 	MonoString *nspace;
@@ -1260,7 +1263,7 @@ typedef struct {
 	MonoArray *permissions;
 	MonoReflectionType *created;
 	gint32 state;
-} MonoReflectionTypeBuilder;
+};
 
 /* Safely access System.Reflection.Emit.TypeBuilder from native code */
 TYPED_HANDLE_DECL (MonoReflectionTypeBuilder);
@@ -1780,12 +1783,6 @@ mono_object_try_to_string (MonoObject *obj, MonoObject **exc, MonoError *error);
 
 char *
 mono_string_to_utf8_ignore (MonoString *s);
-
-char *
-mono_string_to_utf8_image_ignore (MonoImage *image, MonoString *s);
-
-char *
-mono_string_to_utf8_mp_ignore (MonoMemPool *mp, MonoString *s);
 
 gboolean
 mono_monitor_is_il_fastpath_wrapper (MonoMethod *method);
