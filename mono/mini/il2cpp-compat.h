@@ -9,7 +9,7 @@
 #include <mono/sgen/sgen-conf.h>
 #include <mono/metadata/profiler.h>
 
-#ifdef IL2CPP_MONO_DEBUGGER
+#ifdef RUNTIME_IL2CPP
 
 #define THREAD_STATIC_FIELD_OFFSET -1
 
